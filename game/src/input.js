@@ -1,53 +1,83 @@
-// Keyboard and mouse, and the pointer lock that turns mouse movement into look.
-// Plain browser APIs only. The buy menu and the plant key read the same key set
-// the simulation reads, so there is no second input path to drift out of sync.
-export function createInput(canvas, onLockChange) {
-  const keys = new Set();
-  const state = { keys, locked: false, firing: false, lookX: 0, lookY: 0 };
+// Keyboard + mouse + pointer lock. Keeps the raw input state in one place
+// and hands the game frame deltas to consume: look movement, pressed-this-
+// frame keys, held keys, and the firing state. Pointer lock is requested on
+// the canvas click; losing it pauses the live game (the player must click
+// to re-capture).
+export function createInput(canvas) {
+  const input = {
+    keys: new Set(),
+    pressed: new Set(), // keys pressed since the last consume
+    lookDX: 0,
+    lookDY: 0,
+    firing: false,
+    locked: false,
+    // Sensitivity in radians per pixel of mouse movement.
+    sensitivity: 0.0023,
 
-  function setKey(event, down) {
-    if (down) keys.add(event.code);
-    else keys.delete(event.code);
-    // Space scrolls the page; the game owns it instead.
-    if (event.code === 'Space') event.preventDefault();
-  }
-
-  window.addEventListener('keydown', (event) => setKey(event, true));
-  window.addEventListener('keyup', (event) => setKey(event, false));
-  // Losing the window must not leave a key stuck down.
-  window.addEventListener('blur', () => keys.clear());
-  window.addEventListener('mousemove', (event) => {
-    if (!state.locked) return;
-    state.lookX += event.movementX;
-    state.lookY += event.movementY;
-  });
-  window.addEventListener('mousedown', (event) => {
-    if (state.locked && event.button === 0) state.firing = true;
-  });
-  window.addEventListener('mouseup', (event) => {
-    if (event.button === 0) state.firing = false;
-  });
-  document.addEventListener('pointerlockchange', () => {
-    state.locked = document.pointerLockElement === canvas;
-    if (!state.locked) {
-      keys.clear();
-      state.firing = false;
-    }
-    onLockChange(state.locked);
-  });
-
-  return {
-    state,
-    requestLock() {
-      canvas.requestPointerLock();
+    // One frame's look, clamped: a single wild event (a pointer-lock
+    // acquire, a synthetic jump) must never spin the view to the sky.
+    consumeLook() {
+      const cap = (v) => Math.max(-200, Math.min(200, v));
+      const dx = cap(this.lookDX);
+      const dy = cap(this.lookDY);
+      this.lookDX = 0;
+      this.lookDY = 0;
+      return { dx, dy };
     },
-    // Consume the accumulated mouse delta since the last frame.
-    takeLook() {
-      const x = state.lookX;
-      const y = state.lookY;
-      state.lookX = 0;
-      state.lookY = 0;
-      return { x, y };
+    // True once, on the frame the key went down.
+    wasPressed(code) {
+      return this.pressed.has(code);
+    },
+    isDown(code) {
+      return this.keys.has(code);
+    },
+    endFrame() {
+      this.pressed.clear();
+    },
+    requestLock() {
+      if (!this.locked) canvas.requestPointerLock();
     },
   };
+
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    input.keys.add(e.code);
+    input.pressed.add(e.code);
+    if (e.code === 'Space') e.preventDefault();
+  });
+  window.addEventListener('keyup', (e) => {
+    input.keys.delete(e.code);
+  });
+  window.addEventListener('blur', () => {
+    input.keys.clear();
+    input.firing = false;
+  });
+  document.addEventListener('pointerlockchange', () => {
+    input.locked = document.pointerLockElement === canvas;
+    if (!input.locked) input.firing = false;
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!input.locked) return;
+    // Clamp each event's delta: a single wild jump (a pointer-lock
+    // acquire, a synthetic event from automation) must never spin the
+    // view. Real flicks arrive as a stream of small events, so a per-
+    // event cap costs nothing and a per-frame cap backs it up.
+    const clamp = (v) => Math.max(-60, Math.min(60, v));
+    input.lookDX += clamp(e.movementX);
+    input.lookDY += clamp(e.movementY);
+  });
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (!input.locked) {
+      input.requestLock();
+      return;
+    }
+    input.firing = true;
+  });
+  window.addEventListener('mouseup', (e) => {
+    if (e.button === 0) input.firing = false;
+  });
+  canvas.addEventListener('click', () => input.requestLock());
+
+  return input;
 }

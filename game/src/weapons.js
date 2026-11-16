@@ -1,220 +1,207 @@
-// The arsenal: three hitscan weapons and a frag grenade. The defs own the
-// numbers; main.js owns the ray and the damage. Spread punishes moving, airborne
-// and sustained fire; crouching tightens it. One view model per weapon, swapped
-// on select; the muzzle flash and its light are shared by all three.
+// Weapons: definitions, the player's loadout, spread/recoil maths, and the
+// first-person view models. Spread grows with movement speed, firing while
+// airborne, and sustained fire — stopping to aim pays. Crouching tightens
+// it. Headshots multiply damage per weapon.
 import * as THREE from 'three';
-import { PALETTE } from './palette.js';
+import { PAL } from './palette.js';
+import { ECONOMY } from './state.js';
 
 export const WEAPONS = {
-  rifle: {
-    id: 'rifle', name: 'AR-77 Kestrel', short: 'KESTREL', price: 0, damage: 34, headMult: 3,
-    fireGap: 0.096, auto: true, mag: 30, reserve: 90, reload: 1.9,
-    spreadStill: 0.0022, spreadMove: 0.028, recoil: 0.011, pellets: 1,
+  kestrel: {
+    id: 'kestrel',
+    name: 'AR-77 Kestrel',
+    kind: 'rifle',
+    slot: 1,
+    price: 0, // owned from the start
+    damage: 34,
+    headMult: 3,
+    rpm: 600,
+    magSize: 25,
+    reserveMax: 75,
+    pellets: 1,
+    auto: true,
+    baseSpread: 0.011,
+    moveSpread: 0.028,
+    airSpread: 0.05,
+    crouchSpread: 0.006,
+    heatPerShot: 0.012,
+    heatCool: 0.05,
+    recoilKick: 0.011,
+    recoilRecover: 0.09,
+    reloadSeconds: 2.1,
+    range: 120,
   },
-  smg: {
-    id: 'smg', name: 'SMG-9 Wasp', short: 'WASP', price: 600, damage: 25, headMult: 2,
-    fireGap: 0.07, auto: true, mag: 32, reserve: 96, reload: 1.6,
-    spreadStill: 0.004, spreadMove: 0.034, recoil: 0.007, pellets: 1,
+  wasp: {
+    id: 'wasp',
+    name: 'SMG-9 Wasp',
+    kind: 'smg',
+    slot: 2,
+    price: ECONOMY.price.wasp,
+    damage: 22,
+    headMult: 2,
+    rpm: 900,
+    magSize: 30,
+    reserveMax: 90,
+    pellets: 1,
+    auto: true,
+    baseSpread: 0.02,
+    moveSpread: 0.03,
+    airSpread: 0.055,
+    crouchSpread: 0.011,
+    heatPerShot: 0.009,
+    heatCool: 0.07,
+    recoilKick: 0.007,
+    recoilRecover: 0.11,
+    reloadSeconds: 1.7,
+    range: 80,
   },
-  shotgun: {
-    id: 'shotgun', name: 'SG-12 Breacher', short: 'BREACHER', price: 700, damage: 13, headMult: 1.5,
-    fireGap: 0.85, auto: false, mag: 6, reserve: 24, reload: 2.4,
-    spreadStill: 0.02, spreadMove: 0.05, recoil: 0.035, pellets: 8,
+  breacher: {
+    id: 'breacher',
+    name: 'SG-12 Breacher',
+    kind: 'shotgun',
+    slot: 3,
+    price: ECONOMY.price.breacher,
+    damage: 9,
+    headMult: 1.5,
+    rpm: 70,
+    magSize: 6,
+    reserveMax: 24,
+    pellets: 8,
+    auto: false,
+    baseSpread: 0.055,
+    moveSpread: 0.04,
+    airSpread: 0.07,
+    crouchSpread: 0.035,
+    heatPerShot: 0.05,
+    heatCool: 0.08,
+    recoilKick: 0.038,
+    recoilRecover: 0.06,
+    reloadSeconds: 2.6,
+    range: 40,
   },
 };
-export const GRENADE_PRICE = 300;
-export const ARMOR_PRICE = 650;
-export const WEAPON_ORDER = ['rifle', 'smg', 'shotgun'];
 
-// View-model parts: [size, position, tilt-x] per weapon, built from two shared
-// materials so the three guns read as one family.
-function buildModel(def, dark, light) {
-  const parts = {
-    rifle: [
-      [[0.09, 0.1, 0.42], [0, 0, 0], 0, light],
-      [[0.045, 0.045, 0.4], [0, 0.025, -0.38], 0, dark],
-      [[0.075, 0.08, 0.22], [0, -0.02, 0.3], 0, dark],
-      [[0.03, 0.05, 0.08], [0, 0.075, -0.05], 0, dark],
-    ],
-    smg: [
-      [[0.08, 0.09, 0.3], [0, 0, 0], 0, light],
-      [[0.04, 0.04, 0.22], [0, 0.02, -0.25], 0, dark],
-      [[0.05, 0.16, 0.07], [0, -0.11, -0.02], 0.2, dark],
-      [[0.06, 0.06, 0.16], [0, -0.01, 0.22], 0, dark],
-    ],
-    shotgun: [
-      [[0.1, 0.11, 0.34], [0, 0, 0], 0, light],
-      [[0.06, 0.06, 0.42], [0, 0.03, -0.36], 0, dark],
-      [[0.08, 0.07, 0.14], [0, -0.02, -0.3], 0, light],
-      [[0.08, 0.09, 0.2], [0, -0.02, 0.26], 0, dark],
-    ],
-  }[def.id];
-  const group = new THREE.Group();
-  for (const [size, pos, tilt, material] of parts) {
-    const part = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), material);
-    part.position.set(pos[0], pos[1], pos[2]);
-    if (tilt) part.rotation.x = tilt;
-    group.add(part);
+export const WEAPON_ORDER = ['kestrel', 'wasp', 'breacher'];
+
+// A fresh loadout: rifle owned, everything else bought in the buy menu.
+export function createLoadout() {
+  return {
+    current: 'kestrel',
+    owned: { kestrel: true, wasp: false, breacher: false },
+    mag: { kestrel: 25, wasp: 0, breacher: 0 },
+    reserve: { kestrel: 75, wasp: 0, breacher: 0 },
+    grenades: 0,
+    kevlar: false,
+    heat: 0, // sustained-fire spread, 0..1
+    recoil: 0, // accumulated pitch kick, radians
+    reloading: 0, // seconds left, 0 = not reloading
+    cooldown: 0, // seconds until the next shot may fire
+    lastShotAt: -10,
+  };
+}
+
+export function currentWeapon(loadout) {
+  return WEAPONS[loadout.current];
+}
+
+// Spread in radians for one shot, from the shooter's state.
+export function spreadFor(weapon, { speed, airborne, crouched, heat }) {
+  let s = weapon.baseSpread;
+  s += Math.min(1, speed / 4.2) * weapon.moveSpread;
+  if (airborne) s += weapon.airSpread;
+  if (crouched) s -= weapon.crouchSpread;
+  s += heat * 0.02;
+  return Math.max(0.003, s);
+}
+
+// Buy a weapon (or a consumable) if the money is there. Returns a result
+// string the HUD shows: 'bought' | 'owned' | 'poor'.
+export function buyItem(match, loadout, item) {
+  if (item === 'frag') {
+    if (loadout.grenades >= 2) return 'owned';
+    if (match.money < ECONOMY.price.frag) return 'poor';
+    match.money -= ECONOMY.price.frag;
+    loadout.grenades += 1;
+    return 'bought';
   }
-  group.position.set(0.27, -0.24, -0.58);
-  group.scale.set(0.6, 0.6, 0.6);
-  group.visible = false;
+  if (item === 'kevlar') {
+    if (loadout.kevlar) return 'owned';
+    if (match.money < ECONOMY.price.kevlar) return 'poor';
+    match.money -= ECONOMY.price.kevlar;
+    loadout.kevlar = true;
+    return 'bought';
+  }
+  const w = WEAPONS[item];
+  if (!w) return 'poor';
+  if (loadout.owned[item]) return 'owned';
+  if (match.money < w.price) return 'poor';
+  match.money -= w.price;
+  loadout.owned[item] = true;
+  loadout.mag[item] = w.magSize;
+  loadout.reserve[item] = w.reserveMax;
+  loadout.current = item;
+  return 'bought';
+}
+
+// --- View models -----------------------------------------------------------
+// Simple low-poly guns built from boxes, parented to the camera. Each kind
+// reads differently at a glance: long barrel rifle, short SMG, wide shotgun.
+function gunMaterial() {
+  return new THREE.MeshStandardMaterial({ color: PAL.gun, roughness: 0.5, metalness: 0.55 });
+}
+function accentMaterial() {
+  return new THREE.MeshStandardMaterial({ color: PAL.gunAccent, roughness: 0.6, metalness: 0.4 });
+}
+
+export function buildViewModel(kind) {
+  const group = new THREE.Group();
+  const body = gunMaterial();
+  const accent = accentMaterial();
+  const add = (w, h, d, x, y, z, mat = body) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(x, y, z);
+    group.add(m);
+    return m;
+  };
+  if (kind === 'rifle') {
+    add(0.07, 0.1, 0.62, 0, 0, -0.1); // receiver
+    add(0.035, 0.035, 0.42, 0, 0.02, -0.5); // barrel
+    add(0.05, 0.12, 0.1, 0, -0.09, -0.05, accent); // grip
+    add(0.05, 0.16, 0.08, 0, -0.1, -0.28); // fore grip
+    add(0.06, 0.05, 0.2, 0, -0.07, 0.12, accent); // stock
+    add(0.02, 0.05, 0.02, 0, 0.07, -0.32); // front sight
+  } else if (kind === 'smg') {
+    add(0.07, 0.09, 0.42, 0, 0, -0.05);
+    add(0.03, 0.03, 0.24, 0, 0.015, -0.36);
+    add(0.05, 0.14, 0.07, 0, -0.1, -0.18); // mag
+    add(0.05, 0.1, 0.08, 0, -0.08, 0.02, accent);
+    add(0.055, 0.04, 0.14, 0, -0.06, 0.1, accent);
+  } else {
+    // shotgun
+    add(0.08, 0.11, 0.55, 0, 0, -0.08);
+    add(0.05, 0.05, 0.4, 0, 0.03, -0.5); // fat barrel
+    add(0.06, 0.05, 0.4, 0, -0.045, -0.42, accent); // pump
+    add(0.05, 0.11, 0.09, 0, -0.09, -0.02, accent);
+    add(0.07, 0.05, 0.18, 0, -0.07, 0.12); // stock
+  }
+  // Muzzle flash quad, hidden until a shot fires.
+  const flashMat = new THREE.MeshBasicMaterial({
+    color: PAL.muzzle, transparent: true, opacity: 0, side: THREE.DoubleSide,
+  });
+  const flash = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.22), flashMat);
+  flash.position.set(0, 0.02, -0.72);
+  flash.name = 'muzzleFlash';
+  group.add(flash);
+  group.position.set(0.26, -0.24, -0.42);
   return group;
 }
 
-export function createWeaponRig(camera) {
-  const dark = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.hairline), roughness: 0.7, metalness: 0.2 });
-  const light = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.ink), roughness: 0.5, metalness: 0.35 });
-  const models = {};
-  for (const id of WEAPON_ORDER) {
-    models[id] = buildModel(WEAPONS[id], dark, light);
-    camera.add(models[id]);
-  }
-  models.rifle.visible = true;
-
-  // Muzzle flash: a small radial-glow sprite painted once on a canvas (no image
-  // file), so the flash reads as light, not as a flat card.
-  const flashCanvas = document.createElement('canvas');
-  flashCanvas.width = 64;
-  flashCanvas.height = 64;
-  const flashCtx = flashCanvas.getContext('2d');
-  const gradient = flashCtx.createRadialGradient(32, 32, 2, 32, 32, 30);
-  gradient.addColorStop(0, 'rgba(255,244,214,1)');
-  gradient.addColorStop(0.35, 'rgba(242,169,59,0.9)');
-  gradient.addColorStop(1, 'rgba(242,169,59,0)');
-  flashCtx.fillStyle = gradient;
-  flashCtx.fillRect(0, 0, 64, 64);
-  const flashTexture = new THREE.CanvasTexture(flashCanvas);
-  const flash = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.22, 0.22),
-    new THREE.MeshBasicMaterial({ map: flashTexture, transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending }),
-  );
-  flash.position.set(0.26, -0.19, -0.95);
-  flash.visible = false;
-  camera.add(flash);
-  const flashLight = new THREE.PointLight(new THREE.Color(PALETTE.accent), 0, 5);
-  flashLight.position.set(0.26, -0.17, -0.6);
-  camera.add(flashLight);
-
-  const ammo = {};
-  for (const id of WEAPON_ORDER) ammo[id] = { mag: WEAPONS[id].mag, reserve: WEAPONS[id].reserve };
-  const state = {
-    current: 'rifle',
-    owned: new Set(['rifle']),
-    ammo,
-    grenades: 0,
-    armor: false,
-    cooldown: 0,
-    reloadLeft: 0,
-    flash: 0,
-    kick: 0,
-    heat: 0,
-  };
-
-  function def() {
-    return WEAPONS[state.current];
-  }
-
-  // Per frame: cool down, decay the flash and the heat, spring the view model
-  // back from its kick, and run the reload timer to completion.
-  function step(dt) {
-    state.cooldown = Math.max(0, state.cooldown - dt);
-    state.flash = Math.max(0, state.flash - dt);
-    state.heat = Math.max(0, state.heat - dt * 0.55);
-    state.kick += (0 - state.kick) * Math.min(1, dt * 14);
-    const model = models[state.current];
-    model.position.z = -0.58 + state.kick;
-    model.rotation.x = state.kick * 2.2;
-    flash.visible = state.flash > 0;
-    flash.rotation.z = 0;
-    flashLight.intensity = state.flash > 0 ? 18 : 0;
-    if (state.reloadLeft > 0) {
-      const d = def();
-      state.reloadLeft = Math.max(0, state.reloadLeft - dt);
-      // Dip the gun while the magazine is out.
-      model.rotation.x = -0.55 * Math.min(1, (d.reload - state.reloadLeft) * 2);
-      if (state.reloadLeft === 0) {
-        const a = state.ammo[state.current];
-        const take = Math.min(d.mag - a.mag, a.reserve);
-        a.mag += take;
-        a.reserve -= take;
-      }
-    }
-  }
-
-  return {
-    state,
-    def,
-    step,
-    ready() {
-      return state.ammo[state.current].mag > 0 && state.cooldown === 0 && state.reloadLeft === 0;
-    },
-    pullTrigger() {
-      const d = def();
-      state.cooldown = d.fireGap;
-      state.flash = 0.06;
-      state.kick = 0.055;
-      state.heat = Math.min(1, state.heat + (d.id === 'shotgun' ? 0.5 : 0.09));
-    },
-    takeRound() {
-      const a = state.ammo[state.current];
-      if (a.mag <= 0) return false;
-      a.mag -= 1;
-      return true;
-    },
-    reload() {
-      const d = def();
-      const a = state.ammo[state.current];
-      if (state.reloadLeft > 0 || a.mag === d.mag || a.reserve === 0) return;
-      state.reloadLeft = d.reload;
-    },
-    // Spread: still < crouched < moving < airborne, plus heat from sustained fire.
-    spread(speed, crouching, airborne) {
-      const d = def();
-      let spread = d.spreadStill + Math.min(1, speed / 5.4) * d.spreadMove + state.heat * 0.02;
-      if (crouching) spread *= 0.6;
-      if (airborne) spread *= 1.8;
-      return spread;
-    },
-    select(id) {
-      if (!state.owned.has(id) || state.reloadLeft > 0) return false;
-      state.current = id;
-      for (const key of WEAPON_ORDER) models[key].visible = key === id;
-      state.cooldown = Math.max(state.cooldown, 0.25);
-      return true;
-    },
-    buy(id) {
-      const d = WEAPONS[id];
-      if (!d || state.owned.has(id)) return -1;
-      state.owned.add(id);
-      state.ammo[id] = { mag: d.mag, reserve: d.reserve };
-      return d.price;
-    },
-    // Between rounds: full magazines for what is owned, no armour, no grenades,
-    // and only the rifle stays in the loadout — purchases are per round.
-    resetRound() {
-      for (const id of state.owned) {
-        const d = WEAPONS[id];
-        state.ammo[id] = { mag: d.mag, reserve: d.reserve };
-      }
-      state.cooldown = 0;
-      state.reloadLeft = 0;
-      state.flash = 0;
-      state.kick = 0;
-      state.heat = 0;
-      state.armor = false;
-      state.grenades = 0;
-      state.owned = new Set(['rifle']);
-      state.current = 'rifle';
-      for (const key of WEAPON_ORDER) models[key].visible = key === 'rifle';
-    },
-    // Refill what is already owned (a new round after a round won, before the
-    // buy phase resets the loadout).
-    refillOwned() {
-      for (const id of state.owned) {
-        const d = WEAPONS[id];
-        state.ammo[id] = { mag: d.mag, reserve: d.reserve };
-      }
-    },
-  };
+// Swap the visible gun when the player changes weapon.
+export function swapViewModel(camera, group, kind) {
+  if (group.userData.kind === kind) return group;
+  camera.remove(group);
+  const next = buildViewModel(kind);
+  next.userData.kind = kind;
+  camera.add(next);
+  return next;
 }

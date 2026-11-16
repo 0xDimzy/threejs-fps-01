@@ -1,88 +1,136 @@
-// Shared AABB movement: one mover serves the player and every bot, so collision
-// behaves identically for both. A body is an upright box; each axis is tested and
-// resolved on its own, so a wall never swallows a body and sliding along it works.
+// Shared AABB physics: axis-separated movement against the map solids, and
+// ray-vs-box tests for hitscan. Player and bots both move through here, so
+// collision behaves identically for both sides.
 import * as THREE from 'three';
 
-const GRAVITY = 20;
-
-// A body at (x, z) on the floor, with a fixed collision radius and height.
-export function createBody(colliders, x, z, radius = 0.34, height = 1.72) {
+// A solid from map.js, normalised to min/max bounds once at load.
+export function solidBounds(s) {
+  const y0 = s.y0 ?? 0;
   return {
-    colliders,
-    position: new THREE.Vector3(x, 0, z),
-    velocity: new THREE.Vector3(),
-    radius,
-    height,
-    onGround: true,
+    minX: s.cx - s.sx / 2,
+    maxX: s.cx + s.sx / 2,
+    minZ: s.cz - s.sz / 2,
+    maxZ: s.cz + s.sz / 2,
+    minY: y0,
+    maxY: y0 + s.h,
   };
 }
 
-// One scratch box, reused so the hot path allocates nothing.
-const probe = new THREE.Box3();
-
-// The first collider the upright box at (x, y, z) would overlap, or null. `lift`
-// shrinks the box vertically so a body standing exactly on a surface does not
-// count as intersecting it.
-export function overlapsAt(colliders, x, y, z, radius, height, lift = 0) {
-  probe.min.set(x - radius, y + lift, z - radius);
-  probe.max.set(x + radius, y + height - lift, z + radius);
-  for (const collider of colliders) {
-    if (probe.intersectsBox(collider)) return collider;
-  }
-  return null;
+// Do two axis-aligned boxes overlap? (2D footprint + height band.)
+export function boxesOverlap(a, b) {
+  return (
+    a.minX < b.maxX &&
+    a.maxX > b.minX &&
+    a.minZ < b.maxZ &&
+    a.maxZ > b.minZ &&
+    a.minY < b.maxY &&
+    a.maxY > b.minY
+  );
 }
 
-// wishX/wishZ is a unit (or zero) direction on the ground plane; speed is the
-// target speed. Acceleration pulls the velocity toward the wish, friction damps
-// it to a stop when there is no wish.
-export function moveBody(body, dt, wishX, wishZ, speed, accel, friction) {
-  const blend = Math.min(1, (accel * dt) / Math.max(speed, 0.01));
-  body.velocity.x += (wishX * speed - body.velocity.x) * blend;
-  body.velocity.z += (wishZ * speed - body.velocity.z) * blend;
-  if (body.onGround && wishX === 0 && wishZ === 0) {
-    const damp = Math.max(0, 1 - friction * dt);
-    body.velocity.x *= damp;
-    body.velocity.z *= damp;
+// Move a standing body (position = feet centre) with axis separation:
+// resolve X, then Z, then Y, so sliding along walls works and the body
+// never tunnels into a solid. Returns which axes collided.
+export function moveBody(pos, half, height, vel, dt, solids) {
+  const hits = { x: false, z: false, y: false, grounded: false };
+  // X axis.
+  pos.x += vel.x * dt;
+  let box = bodyBox(pos, half, height);
+  for (const s of solids) {
+    if (!boxesOverlap(box, s)) continue;
+    if (vel.x > 0) pos.x = s.minX - half - 0.001;
+    else if (vel.x < 0) pos.x = s.maxX + half + 0.001;
+    else pos.x = pos.x; // pushed out by an overlap with no velocity: leave
+    hits.x = true;
+    box = bodyBox(pos, half, height);
   }
-  body.velocity.y -= GRAVITY * dt;
-
-  // Horizontal axes first, one at a time: a blocked axis stops and zeroes its
-  // velocity, the other still moves, which is what makes wall-sliding work.
-  const lift = 0.04;
-  const nextX = body.position.x + body.velocity.x * dt;
-  if (!overlapsAt(body.colliders, nextX, body.position.y, body.position.z, body.radius, body.height, lift)) {
-    body.position.x = nextX;
+  // Z axis.
+  pos.z += vel.z * dt;
+  box = bodyBox(pos, half, height);
+  for (const s of solids) {
+    if (!boxesOverlap(box, s)) continue;
+    if (vel.z > 0) pos.z = s.minZ - half - 0.001;
+    else if (vel.z < 0) pos.z = s.maxZ + half + 0.001;
+    hits.z = true;
+    box = bodyBox(pos, half, height);
+  }
+  // Y axis: gravity lands on the ground plane or on top of a solid.
+  pos.y += vel.y * dt;
+  if (pos.y <= 0) {
+    pos.y = 0;
+    hits.y = true;
+    hits.grounded = true;
   } else {
-    body.velocity.x = 0;
+    box = bodyBox(pos, half, height);
+    for (const s of solids) {
+      if (!boxesOverlap(box, s)) continue;
+      if (vel.y <= 0 && pos.y < s.maxY && pos.y + height > s.maxY) {
+        pos.y = s.maxY;
+        hits.y = true;
+        hits.grounded = true;
+      }
+    }
   }
-  const nextZ = body.position.z + body.velocity.z * dt;
-  if (!overlapsAt(body.colliders, body.position.x, body.position.y, nextZ, body.radius, body.height, lift)) {
-    body.position.z = nextZ;
-  } else {
-    body.velocity.z = 0;
-  }
-
-  // Then the vertical axis: land on a collider's top, or bonk the head on its
-  // underside, or fall back to the floor at y = 0.
-  body.position.y += body.velocity.y * dt;
-  body.onGround = false;
-  const hit = overlapsAt(body.colliders, body.position.x, body.position.y, body.position.z, body.radius, body.height, 0);
-  if (hit && body.velocity.y <= 0) {
-    body.position.y = hit.max.y;
-    body.velocity.y = 0;
-    body.onGround = true;
-  } else if (hit) {
-    body.position.y = hit.min.y - body.height;
-    body.velocity.y = 0;
-  }
-  if (body.position.y < 0) {
-    body.position.y = 0;
-    body.velocity.y = 0;
-    body.onGround = true;
-  }
-  body.velocity.y = Math.max(-30, body.velocity.y);
+  return hits;
 }
 
-export function groundSpeed(body) {
-  return Math.hypot(body.velocity.x, body.velocity.z);
+export function bodyBox(pos, half, height) {
+  return {
+    minX: pos.x - half,
+    maxX: pos.x + half,
+    minZ: pos.z - half,
+    maxZ: pos.z + half,
+    minY: pos.y,
+    maxY: pos.y + height,
+  };
+}
+
+// Ray vs AABB (slab test). Returns the entry distance, or null on a miss.
+// dir must be normalised. maxDist caps the search.
+export function rayBox(origin, dir, box, maxDist = Infinity) {
+  let tmin = 0;
+  let tmax = maxDist;
+  const o = [origin.x, origin.y, origin.z];
+  const d = [dir.x, dir.y, dir.z];
+  const mn = [box.minX, box.minY, box.minZ];
+  const mx = [box.maxX, box.maxY, box.maxZ];
+  for (let i = 0; i < 3; i++) {
+    if (Math.abs(d[i]) < 1e-9) {
+      if (o[i] < mn[i] || o[i] > mx[i]) return null;
+    } else {
+      let t1 = (mn[i] - o[i]) / d[i];
+      let t2 = (mx[i] - o[i]) / d[i];
+      if (t1 > t2) {
+        const tmp = t1;
+        t1 = t2;
+        t2 = tmp;
+      }
+      if (t1 > tmin) tmin = t1;
+      if (t2 < tmax) tmax = t2;
+      if (tmin > tmax) return null;
+    }
+  }
+  return tmin;
+}
+
+// Nearest solid the ray hits, or null. Used to cap hitscan range and to
+// decide whether a bot actually has line of sight on the player.
+export function raySolids(origin, dir, solids, maxDist = 200) {
+  let best = null;
+  for (const s of solids) {
+    const t = rayBox(origin, dir, s, maxDist);
+    if (t !== null && (best === null || t < best)) best = t;
+  }
+  return best;
+}
+
+// Line-of-sight check between two points at eye height, ignoring the
+// endpoints' own boxes: true when no solid blocks the segment.
+export function hasLineOfSight(a, b, solids) {
+  const dir = new THREE.Vector3().subVectors(b, a);
+  const dist = dir.length();
+  if (dist < 0.001) return true;
+  dir.multiplyScalar(1 / dist);
+  const t = raySolids(a, dir, solids, dist - 0.05);
+  return t === null;
 }

@@ -1,280 +1,262 @@
-// The DOM HUD: health, armour, ammo, money, timer, score, team pips, kill feed,
-// round banner, plant bar, buy menu and the minimap. It never touches the
-// simulation; main.js pushes numbers in and reads the play/buy callbacks out.
-// The minimap is drawn from the same MAP boxes the world is built from.
+// HUD: health, armour, ammo, money, timer, score, objective, kill feed,
+// buy menu, banners, plant progress, and the minimap. The minimap renders
+// its static layer (walls, lanes, sites) once into an offscreen canvas and
+// only redraws the moving dots per frame — no per-frame allocation in the
+// hot path beyond the draw calls themselves.
 import { MAP } from './map.js';
+import { ECONOMY } from './state.js';
+import { WEAPONS } from './weapons.js';
+import { PAL, hexToRgba } from './palette.js';
 
-// Overlay copy per mode; roundEnd/matchEnd get their score text from main.js.
-const COPY = {
-  start: {
-    title: 'EMBERLINE',
-    copy: 'Vanguard vs Cinder in the Cinderworks Yard. Plant the charge at Site A or Site B — or eliminate all four defenders. First to 5 rounds.',
-    action: 'Click to play',
-  },
-  paused: {
-    title: 'EMBERLINE',
-    copy: 'Paused. Click to resume.',
-    action: 'Click to resume',
-  },
-  roundEnd: {
-    title: 'Round over',
-    copy: '',
-    action: 'Next round',
-  },
-  matchEnd: {
-    title: 'Match over',
-    copy: '',
-    action: 'Play again',
-  },
-};
+const BUY_ROWS = [
+  { id: 'wasp', key: '2', name: 'SMG-9 Wasp', price: ECONOMY.price.wasp, note: 'Fast, close range' },
+  { id: 'breacher', key: '3', name: 'SG-12 Breacher', price: ECONOMY.price.breacher, note: '8-pellet spread' },
+  { id: 'frag', key: 'G', name: 'Frag-9 grenade', price: ECONOMY.price.frag, note: 'Throw with G (max 2)' },
+  { id: 'kevlar', key: '4', name: 'Kevlar vest', price: ECONOMY.price.kevlar, note: 'Halves damage taken' },
+];
 
 export function createHud() {
   const $ = (id) => document.getElementById(id);
-  const el = {
-    overlay: $('overlay'),
-    title: $('overlay-title'),
-    copy: $('overlay-copy'),
-    play: $('play'),
-    healthNum: $('health-num'),
-    healthFill: $('health-fill'),
-    armorInd: $('armor-ind'),
-    ammoMag: $('ammo-mag'),
-    ammoReserve: $('ammo-reserve'),
-    weaponName: $('weapon-name'),
-    grenadeCount: $('grenade-count'),
-    moneyValue: $('money-value'),
-    timerValue: $('timer-value'),
-    roundScore: $('round-score-text'),
-    aliveV: $('alive-v'),
-    aliveC: $('alive-c'),
-    objective: $('objective'),
-    killfeed: $('killfeed'),
-    banner: $('banner'),
-    bannerTitle: $('banner-title'),
-    bannerSub: $('banner-sub'),
-    plantBar: $('plant-bar'),
-    plantFill: $('plant-fill'),
-    plantLabel: $('plant-label'),
-    buyPanel: $('buy'),
-    buyMoney: $('buy-money'),
-    crosshair: $('crosshair'),
-    hitmarker: $('hitmarker'),
-    damage: $('damage'),
-    minimap: $('minimap'),
+  const hud = {
+    els: {
+      healthNum: $('hud-health-num'),
+      healthBar: $('hud-health-bar'),
+      armour: $('hud-armour'),
+      ammoMag: $('hud-ammo-mag'),
+      ammoReserve: $('hud-ammo-reserve'),
+      weaponName: $('hud-weapon'),
+      grenades: $('hud-grenades'),
+      money: $('hud-money'),
+      timer: $('hud-timer'),
+      round: $('hud-round'),
+      score: $('hud-score'),
+      objective: $('hud-objective'),
+      feed: $('hud-feed'),
+      banner: $('hud-banner'),
+      bannerTitle: $('hud-banner-title'),
+      bannerSub: $('hud-banner-sub'),
+      crosshair: $('hud-crosshair'),
+      hitmarker: $('hud-hitmarker'),
+      plantWrap: $('hud-plant'),
+      plantFill: $('hud-plant-fill'),
+      plantLabel: $('hud-plant-label'),
+      buyMenu: $('hud-buy'),
+      buyRows: $('hud-buy-rows'),
+      buyMoney: $('hud-buy-money'),
+      startOverlay: $('overlay-start'),
+      endOverlay: $('overlay-end'),
+      endTitle: $('overlay-end-title'),
+      endSub: $('overlay-end-sub'),
+      minimap: $('hud-minimap'),
+    },
+    minimapStatic: null,
+    bannerTimer: 0,
+    hitTimer: 0,
   };
-  const mapCtx = el.minimap.getContext('2d');
 
-  // The minimap's static layer (floor, walls, site markers) is rendered once to
-  // an offscreen canvas at load; each frame only blits it and draws the moving
-  // dots and the player arrow on top.
-  const mapStatic = document.createElement('canvas');
-  mapStatic.width = el.minimap.width;
-  mapStatic.height = el.minimap.height;
-  let staticBuilt = false;
-  function buildStaticMap() {
-    const ctx = mapStatic.getContext('2d');
-    const width = mapStatic.width;
-    const height = mapStatic.height;
-    const sx = (x) => ((x + 20) / 40) * width;
-    const sz = (z) => ((z + 16) / 32) * height;
-    ctx.fillStyle = 'rgba(16,20,27,0.85)';
-    ctx.fillRect(0, 0, width, height);
-    for (const [w, h, d, x, y, z] of MAP.boxes) {
-      if (h < 1.5 || y < 0) continue;
-      ctx.fillStyle = 'rgba(139,152,165,0.55)';
-      ctx.fillRect(sx(x - w / 2), sz(z - d / 2), Math.max(1, (w / 40) * width), Math.max(1, (d / 32) * height));
-    }
-    for (const site of MAP.sites) {
-      ctx.fillStyle = site.id === 'A' ? '#f2a93b' : '#4db2e8';
-      ctx.beginPath();
-      ctx.arc(sx(site.x), sz(site.z), 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#0f141b';
-      ctx.font = 'bold 7px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(site.id, sx(site.x), sz(site.z));
-    }
-    staticBuilt = true;
+  // Build the buy menu rows once.
+  hud.els.buyRows.innerHTML = BUY_ROWS.map((row) => `
+    <div class="buy-row" data-item="${row.id}">
+      <span class="buy-key">${row.key}</span>
+      <span class="buy-name">${row.name}</span>
+      <span class="buy-note">${row.note}</span>
+      <span class="buy-price">$${row.price}</span>
+    </div>`).join('');
+
+  // Static minimap layer, rendered once.
+  hud.minimapStatic = buildMinimapStatic();
+  return hud;
+}
+
+function buildMinimapStatic() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 200;
+  canvas.height = 160;
+  const ctx = canvas.getContext('2d');
+  const sx = (x) => ((x + 20) / 40) * 200;
+  const sy = (z) => ((z + 16) / 32) * 160;
+  ctx.fillStyle = '#14181d';
+  ctx.fillRect(0, 0, 200, 160);
+  // Sites.
+  for (const [key, site] of Object.entries(MAP.sites)) {
+    ctx.beginPath();
+    ctx.arc(sx(site.x), sy(site.z), (site.r / 40) * 200, 0, Math.PI * 2);
+    ctx.fillStyle = hexToRgba(site.color, 0.22);
+    ctx.fill();
+    ctx.strokeStyle = hexToRgba(site.color, 0.9);
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.fillStyle = `#${site.color.toString(16).padStart(6, '0')}`;
+    ctx.font = 'bold 13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(key, sx(site.x), sy(site.z) + 4);
   }
-
-  let hitTimer = 0;
-  let bannerTimer = 0;
-  // Last-written text per key, so the DOM is only touched when a value changes.
-  let last = {};
-  let buyHandler = null;
-
-  function setText(element, value, key) {
-    if (last[key] === value) return;
-    last[key] = value;
-    element.textContent = value;
+  // Walls and cover.
+  ctx.fillStyle = '#5a636e';
+  for (const s of MAP.solids) {
+    ctx.fillRect(sx(s.cx - s.sx / 2), sy(s.cz - s.sz / 2), (s.sx / 40) * 200, (s.sz / 32) * 160);
   }
+  // Yard border.
+  ctx.strokeStyle = '#8a94a0';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, 198, 158);
+  return canvas;
+}
 
-  el.buyPanel.querySelectorAll('[data-buy]').forEach((button) => {
-    button.addEventListener('click', () => {
-      if (buyHandler) buyHandler(button.dataset.buy);
-    });
-  });
+// --- Per-frame / per-event updates -----------------------------------------
 
-  return {
-    setHealth(hp, armor) {
-      setText(el.healthNum, String(Math.max(0, Math.ceil(hp))), 'hp');
-      el.healthFill.style.width = `${Math.max(0, Math.min(100, hp))}%`;
-      el.healthFill.classList.toggle('low', hp <= 30);
-      el.armorInd.hidden = !armor;
-    },
-    setAmmo(mag, reserve, weapon, grenades) {
-      setText(el.ammoMag, String(mag), 'mag');
-      setText(el.ammoReserve, `/ ${reserve}`, 'res');
-      setText(el.weaponName, weapon, 'wpn');
-      setText(el.grenadeCount, grenades > 0 ? `◉ ${grenades}` : '', 'grn');
-      $('ammo').classList.toggle('empty', mag === 0);
-    },
-    setMoney(value) {
-      setText(el.moneyValue, `$${value}`, 'money');
-      setText(el.buyMoney, `$${value}`, 'buymoney');
-    },
-    setTimer(seconds, phase) {
-      const value = `${Math.max(0, Math.ceil(seconds))}`;
-      setText(el.timerValue, value, 'timer');
-      el.timerValue.classList.toggle('urgent', seconds <= 10 && phase === 'live');
-      el.timerValue.classList.toggle('fuse', phase === 'fuse');
-    },
-    setScore(wins, losses, round) {
-      setText(el.roundScore, `VANGUARD ${wins} — ${losses} CINDER · R${round}`, 'score');
-    },
-    setAlive(vanguard, cinder) {
-      setText(el.aliveV, '●'.repeat(vanguard) + '○'.repeat(Math.max(0, 1 - vanguard)), 'av');
-      setText(el.aliveC, '●'.repeat(cinder) + '○'.repeat(Math.max(0, 4 - cinder)), 'ac');
-    },
-    setObjective(text) {
-      setText(el.objective, text, 'obj');
-    },
-    feed(text, kind) {
-      const entry = document.createElement('div');
-      entry.className = `feed-${kind || 'info'}`;
-      entry.textContent = text;
-      el.killfeed.prepend(entry);
-      while (el.killfeed.children.length > 5) el.killfeed.removeChild(el.killfeed.lastChild);
-      setTimeout(() => {
-        if (entry.parentNode) entry.parentNode.removeChild(entry);
-      }, 6000);
-    },
-    banner(titleText, subText, holdMs = 2600) {
-      el.bannerTitle.textContent = titleText;
-      el.bannerSub.textContent = subText || '';
-      el.banner.hidden = false;
-      clearTimeout(bannerTimer);
-      bannerTimer = setTimeout(() => {
-        el.banner.hidden = true;
-      }, holdMs);
-    },
-    hideBanner() {
-      el.banner.hidden = true;
-      clearTimeout(bannerTimer);
-    },
-    setPlant(progress, fuse, label) {
-      if (progress === null && fuse === null) {
-        el.plantBar.hidden = true;
-        return;
-      }
-      el.plantBar.hidden = false;
-      if (progress !== null) {
-        el.plantFill.style.width = `${Math.round(progress * 100)}%`;
-        el.plantFill.classList.remove('fuse-fill');
-      } else {
-        el.plantFill.style.width = `${Math.round((fuse / 35) * 100)}%`;
-        el.plantFill.classList.add('fuse-fill');
-      }
-      setText(el.plantLabel, label || '', 'plantlabel');
-    },
-    showBuy(show, owned, money) {
-      el.buyPanel.hidden = !show;
-      if (!show) return;
-      el.buyPanel.querySelectorAll('[data-buy]').forEach((button) => {
-        const id = button.dataset.buy;
-        const price = Number(button.dataset.price);
-        const isOwned = id === 'smg' || id === 'shotgun' ? owned.has(id) : false;
-        button.disabled = isOwned || money < price;
-        button.classList.toggle('owned', isOwned);
-        button.querySelector('.buy-state').textContent = isOwned ? 'OWNED' : `$${price}`;
-      });
-    },
-    onBuy(handler) {
-      buyHandler = handler;
-    },
-    hitMarker(killed, holdMs = 90) {
-      el.hitmarker.classList.add('on');
-      el.hitmarker.classList.toggle('kill', killed);
-      clearTimeout(hitTimer);
-      hitTimer = setTimeout(() => {
-        el.hitmarker.classList.remove('on', 'kill');
-      }, holdMs);
-    },
-    damageFlash() {
-      el.damage.classList.remove('flash');
-      void el.damage.offsetWidth;
-      el.damage.classList.add('flash');
-    },
-    setSpread(px) {
-      el.crosshair.style.setProperty('--gap', `${px.toFixed(1)}px`);
-    },
-    drawMinimap(playerX, playerZ, yaw, bots, plant, time) {
-      const width = el.minimap.width;
-      const height = el.minimap.height;
-      const sx = (x) => ((x + 20) / 40) * width;
-      const sz = (z) => ((z + 16) / 32) * height;
-      if (!staticBuilt) buildStaticMap();
-      mapCtx.clearRect(0, 0, width, height);
-      mapCtx.drawImage(mapStatic, 0, 0);
-      // A planted site blinks on top of its static marker.
-      if (plant.status === 'planted' && plant.site) {
-        const blink = Math.floor(time * 3) % 2 === 0 ? 1 : 0.35;
-        mapCtx.globalAlpha = blink;
-        mapCtx.fillStyle = plant.site.id === 'A' ? '#f2a93b' : '#4db2e8';
-        mapCtx.beginPath();
-        mapCtx.arc(sx(plant.site.x), sz(plant.site.z), 5, 0, Math.PI * 2);
-        mapCtx.fill();
-        mapCtx.globalAlpha = 1;
-      }
-      // Bots only show once they have fired recently — or always, once the
-      // charge is planted and every defender is converging.
-      for (const bot of bots) {
-        if (!bot.alive) continue;
-        if (plant.status !== 'planted' && time - bot.lastShotAt > 3) continue;
-        mapCtx.fillStyle = '#e5484d';
-        mapCtx.beginPath();
-        mapCtx.arc(sx(bot.x), sz(bot.z), 3, 0, Math.PI * 2);
-        mapCtx.fill();
-      }
-      // The player arrow, rotated to the view direction.
-      const px = sx(playerX);
-      const py = sz(playerZ);
-      mapCtx.save();
-      mapCtx.translate(px, py);
-      mapCtx.rotate(Math.atan2(-Math.sin(yaw), -Math.cos(yaw)));
-      mapCtx.fillStyle = '#35c4a5';
-      mapCtx.beginPath();
-      mapCtx.moveTo(0, -6);
-      mapCtx.lineTo(4, 5);
-      mapCtx.lineTo(-4, 5);
-      mapCtx.closePath();
-      mapCtx.fill();
-      mapCtx.restore();
-    },
-    showOverlay(mode, scoreText) {
-      const text = COPY[mode];
-      el.title.textContent = text.title;
-      el.copy.textContent = mode === 'roundEnd' || mode === 'matchEnd' ? scoreText || text.copy : text.copy;
-      el.play.textContent = text.action;
-      el.overlay.hidden = false;
-      el.play.focus();
-    },
-    hideOverlay() {
-      el.overlay.hidden = true;
-    },
-    onPlay(handler) {
-      el.play.addEventListener('click', handler);
-    },
-  };
+export function hudSetHealth(hud, hp, kevlar) {
+  hud.els.healthNum.textContent = String(Math.ceil(hp));
+  hud.els.healthBar.style.width = `${Math.max(0, hp)}%`;
+  hud.els.healthBar.style.background = hp > 50 ? PAL.ok : hp > 25 ? PAL.gold : PAL.danger;
+  hud.els.armour.textContent = kevlar ? 'KEVLAR' : '';
+}
+
+export function hudSetAmmo(hud, loadout) {
+  const w = WEAPONS[loadout.current];
+  hud.els.weaponName.textContent = w.name;
+  hud.els.ammoMag.textContent = String(loadout.mag[w.id]);
+  hud.els.ammoReserve.textContent = String(loadout.reserve[w.id]);
+  hud.els.grenades.textContent = loadout.grenades > 0 ? `FRAG ×${loadout.grenades}` : '';
+}
+
+export function hudSetMoney(hud, money) {
+  hud.els.money.textContent = `$${money}`;
+  hud.els.buyMoney.textContent = `$${money}`;
+}
+
+export function hudSetTimer(hud, seconds) {
+  const s = Math.max(0, Math.ceil(seconds));
+  hud.els.timer.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  hud.els.timer.style.color = s <= 10 ? PAL.danger : PAL.hudText;
+}
+
+export function hudSetScore(hud, match) {
+  hud.els.round.textContent = `ROUND ${match.round}`;
+  hud.els.score.textContent = `${match.vanguardRounds} — ${match.cinderRounds}`;
+}
+
+export function hudSetObjective(hud, text) {
+  hud.els.objective.textContent = text;
+}
+
+export function hudFeed(hud, text) {
+  const line = document.createElement('div');
+  line.className = 'feed-line';
+  line.textContent = text;
+  hud.els.feed.prepend(line);
+  while (hud.els.feed.children.length > 5) hud.els.feed.lastChild.remove();
+  setTimeout(() => line.remove(), 9000);
+}
+
+export function hudBanner(hud, title, sub, seconds = 3) {
+  hud.els.bannerTitle.textContent = title;
+  hud.els.bannerSub.textContent = sub;
+  hud.els.banner.classList.remove('hidden');
+  hud.bannerTimer = seconds;
+}
+
+export function hudHideBanner(hud) {
+  hud.els.banner.classList.add('hidden');
+  hud.bannerTimer = 0;
+}
+
+export function hudHitmarker(hud, kill) {
+  hud.els.hitmarker.classList.remove('hidden');
+  hud.els.hitmarker.classList.toggle('kill', kill);
+  hud.hitTimer = kill ? 0.5 : 0.18;
+}
+
+export function hudSetPlant(hud, fraction, label) {
+  if (fraction === null) {
+    hud.els.plantWrap.classList.add('hidden');
+    return;
+  }
+  hud.els.plantWrap.classList.remove('hidden');
+  hud.els.plantFill.style.width = `${Math.round(fraction * 100)}%`;
+  hud.els.plantLabel.textContent = label;
+}
+
+export function hudShowBuy(hud, show, loadout) {
+  hud.els.buyMenu.classList.toggle('hidden', !show);
+  if (!show) return;
+  for (const row of hud.els.buyRows.querySelectorAll('.buy-row')) {
+    const id = row.dataset.item;
+    const owned = id === 'kevlar'
+      ? loadout.kevlar
+      : id === 'frag'
+        ? loadout.grenades >= 2
+        : loadout.owned[id];
+    row.classList.toggle('owned', !!owned);
+  }
+}
+
+export function hudShowStart(hud, show) {
+  hud.els.startOverlay.classList.toggle('hidden', !show);
+}
+
+export function hudShowEnd(hud, show, title = '', sub = '') {
+  hud.els.endOverlay.classList.toggle('hidden', !show);
+  if (show) {
+    hud.els.endTitle.textContent = title;
+    hud.els.endSub.textContent = sub;
+  }
+}
+
+export function hudTick(hud, dt) {
+  if (hud.bannerTimer > 0) {
+    hud.bannerTimer -= dt;
+    if (hud.bannerTimer <= 0) hudHideBanner(hud);
+  }
+  if (hud.hitTimer > 0) {
+    hud.hitTimer -= dt;
+    if (hud.hitTimer <= 0) hud.els.hitmarker.classList.add('hidden');
+  }
+}
+
+// --- Minimap ---------------------------------------------------------------
+
+export function hudDrawMinimap(hud, player, bots, match) {
+  const canvas = hud.els.minimap;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
+  const sx = (x) => ((x + 20) / 40) * W;
+  const sy = (z) => ((z + 16) / 32) * H;
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(hud.minimapStatic, 0, 0, W, H);
+  // Planted charge blinks on the minimap.
+  if (match.plantedSite) {
+    const site = MAP.sites[match.plantedSite];
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 150);
+    ctx.beginPath();
+    ctx.arc(sx(site.x), sy(site.z), 7 + pulse * 3, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,60,40,${0.5 + pulse * 0.4})`;
+    ctx.fill();
+  }
+  // Bots: only those spotted in the last few seconds.
+  const now = performance.now() / 1000;
+  for (const bot of bots) {
+    if (!bot.alive) continue;
+    if (now - bot.lastSeenAt > 4) continue;
+    ctx.beginPath();
+    ctx.arc(sx(bot.pos.x), sy(bot.pos.z), 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#ff4d3d';
+    ctx.fill();
+  }
+  // Player arrow, rotated to the yaw.
+  const px = sx(player.pos.x);
+  const py = sy(player.pos.z);
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(Math.atan2(Math.sin(player.yaw), -Math.cos(player.yaw)) + Math.PI);
+  ctx.beginPath();
+  ctx.moveTo(0, -6);
+  ctx.lineTo(4.5, 5);
+  ctx.lineTo(0, 2.5);
+  ctx.lineTo(-4.5, 5);
+  ctx.closePath();
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.restore();
 }

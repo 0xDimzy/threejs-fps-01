@@ -1,80 +1,112 @@
-// Thrown frag grenades: a fixed pool of four, gravity, axis-separated bounce off
-// the world's colliders, a 1.6 s fuse, then a blast. The blast itself is the
-// caller's job (onExplode receives the position); this module only moves the
-// grenade and flashes the explosion light.
+// Frag-9 grenades: thrown on an arc, bouncing off the map, a 2.2 s fuse,
+// then a blast that hurts bots and the player alike. The explosion is a
+// growing sphere plus a light flash; the throw itself is an arc the player
+// can read, so grenades reward a planned toss, not a panic throw.
 import * as THREE from 'three';
-import { overlapsAt } from './physics.js';
-import { PALETTE } from './palette.js';
+import { moveBody } from './physics.js';
+import { botHitboxes } from './combat.js';
+import { damageBot } from './bots.js';
+import { damagePlayer } from './player.js';
+import { hudFeed } from './hud.js';
 
-const POOL = 4;
-const FUSE = 1.6;
-const GRAVITY = 18;
+export const GRENADE = {
+  fuseSeconds: 2.2,
+  throwSpeed: 13,
+  upBoost: 3.5,
+  bounce: 0.42,
+  blastRadius: 6,
+  maxDamage: 130,
+  minDamage: 20,
+};
 
-export function createGrenades(scene, colliders, onExplode) {
-  const geometry = new THREE.SphereGeometry(0.09, 10, 8);
-  const material = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.hairline), roughness: 0.4, metalness: 0.6 });
-  const items = [];
-  for (let i = 0; i < POOL; i += 1) {
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.visible = false;
-    scene.add(mesh);
-    items.push({ mesh, velocity: new THREE.Vector3(), fuse: 0, alive: false, owner: 'player' });
-  }
-  const blastLight = new THREE.PointLight(new THREE.Color(PALETTE.accent), 0, 14);
-  scene.add(blastLight);
-  let blastLife = 0;
+export function createGrenades(scene) {
+  return { scene, live: [] };
+}
 
-  function throwGrenade(from, direction, owner) {
-    const item = items.find((entry) => !entry.alive);
-    if (!item) return false;
-    item.alive = true;
-    item.owner = owner;
-    item.fuse = FUSE;
-    item.mesh.position.copy(from);
-    item.mesh.visible = true;
-    item.velocity.copy(direction).multiplyScalar(14);
-    item.velocity.y += 3.5;
-    return true;
-  }
+// Throw from the player's eye, along the camera direction.
+export function throwGrenade(grens, origin, dir) {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.11, 10, 8),
+    new THREE.MeshStandardMaterial({ color: 0x2e4a2e, roughness: 0.5, metalness: 0.5 }),
+  );
+  mesh.position.copy(origin);
+  grens.scene.add(mesh);
+  const vel = dir.clone().multiplyScalar(GRENADE.throwSpeed);
+  vel.y += GRENADE.upBoost;
+  grens.live.push({ mesh, pos: origin.clone(), vel, fuse: GRENADE.fuseSeconds });
+}
 
-  function step(dt) {
-    if (blastLife > 0) {
-      blastLife -= dt;
-      blastLight.intensity = Math.max(0, blastLife / 0.25) * 60;
+export function updateGrenades(grens, dt, game) {
+  for (let i = grens.live.length - 1; i >= 0; i--) {
+    const g = grens.live[i];
+    g.vel.y -= 14.5 * dt;
+    const hits = moveBody(g.pos, 0.11, 0.22, g.vel, dt, game.solids);
+    if (hits.x) g.vel.x *= -GRENADE.bounce;
+    if (hits.z) g.vel.z *= -GRENADE.bounce;
+    if (hits.y) {
+      g.vel.y = Math.abs(g.vel.y) * GRENADE.bounce;
+      if (Math.abs(g.vel.y) < 0.6) g.vel.y = 0;
+      g.vel.x *= 0.7;
+      g.vel.z *= 0.7;
     }
-    for (const item of items) {
-      if (!item.alive) continue;
-      item.fuse -= dt;
-      item.velocity.y -= GRAVITY * dt;
-      const pos = item.mesh.position;
-      // Bounce off walls, one axis at a time, losing energy each time.
-      const nextX = pos.x + item.velocity.x * dt;
-      if (!overlapsAt(colliders, nextX, pos.y - 0.09, pos.z, 0.09, 0.18, 0.02)) pos.x = nextX;
-      else item.velocity.x *= -0.45;
-      const nextZ = pos.z + item.velocity.z * dt;
-      if (!overlapsAt(colliders, pos.x, pos.y - 0.09, nextZ, 0.09, 0.18, 0.02)) pos.z = nextZ;
-      else item.velocity.z *= -0.45;
-      const nextY = pos.y + item.velocity.y * dt;
-      if (nextY < 0.09) {
-        pos.y = 0.09;
-        item.velocity.y = Math.abs(item.velocity.y) * 0.45;
-        item.velocity.x *= 0.8;
-        item.velocity.z *= 0.8;
-      } else if (!overlapsAt(colliders, pos.x, nextY - 0.09, pos.z, 0.09, 0.18, 0)) {
-        pos.y = nextY;
-      } else {
-        item.velocity.y *= -0.45;
-      }
-      if (item.fuse <= 0) {
-        item.alive = false;
-        item.mesh.visible = false;
-        blastLight.position.copy(pos);
-        blastLight.intensity = 60;
-        blastLife = 0.25;
-        onExplode(pos, item.owner);
-      }
+    if (g.pos.y < 0.11) g.pos.y = 0.11;
+    g.mesh.position.copy(g.pos);
+    g.fuse -= dt;
+    if (g.fuse <= 0) {
+      detonate(grens, g, game);
+      game.scene.remove(g.mesh);
+      g.mesh.geometry.dispose();
+      g.mesh.material.dispose();
+      grens.live.splice(i, 1);
     }
   }
+}
 
-  return { throwGrenade, step, alive: () => items.some((item) => item.alive) };
+function detonate(grens, g, game) {
+  const { bots, player, loadout, match, hud, sound } = game;
+  sound.explosion();
+  // Blast sphere + light, faded by the effects tick.
+  const geo = new THREE.SphereGeometry(1, 18, 14);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffa040, transparent: true, opacity: 0.85,
+  });
+  const ball = new THREE.Mesh(geo, mat);
+  ball.position.copy(g.pos);
+  ball.scale.setScalar(0.3);
+  game.scene.add(ball);
+  const light = new THREE.PointLight(0xff8c30, 40, 16, 1.5);
+  light.position.copy(g.pos).y += 0.5;
+  game.scene.add(light);
+  game.fx.push({ kind: 'blast', obj: ball, light, life: 0.4, max: 0.4 });
+
+  const blastAt = g.pos.clone();
+  const damageAt = (pos) => {
+    const d = blastAt.distanceTo(pos);
+    if (d > GRENADE.blastRadius) return 0;
+    const t = 1 - d / GRENADE.blastRadius;
+    return Math.round(GRENADE.minDamage + (GRENADE.maxDamage - GRENADE.minDamage) * t);
+  };
+
+  for (const bot of bots) {
+    if (!bot.alive) continue;
+    const dmg = damageAt(new THREE.Vector3(bot.pos.x, bot.pos.y + 1, bot.pos.z));
+    if (dmg <= 0) continue;
+    const killed = damageBot(bot, dmg);
+    if (killed) {
+      match.kills += 1;
+      match.money += 300;
+      hudFeed(hud, `You fragged ${bot.name} +$300`);
+      sound.kill();
+      if (bots.every((b) => !b.alive)) game.onTeamWiped();
+    } else {
+      hudFeed(hud, `Frag hit ${bot.name} (−${dmg})`);
+    }
+  }
+  // Self-damage: half strength, so a close toss hurts but rarely kills.
+  const selfDmg = Math.floor(damageAt(new THREE.Vector3(player.pos.x, player.pos.y + 1, player.pos.z)) / 2);
+  if (selfDmg > 0 && player.alive) {
+    damagePlayer(player, loadout, selfDmg, game.now);
+    sound.hurt();
+    if (!player.alive) game.onPlayerDied('caught by your own frag');
+  }
 }

@@ -1,30 +1,49 @@
-// EMBERLINE — a three.js tactical FPS entry for threejs-fps-01 (Node 22, stdlib only).
-// main.ts hands the game in: it copies game/ and screenshots/ from beside this file to
-// /output and writes /output/dossier.json with the kit's vendored make.fun library.
-// Outside the grader, MAKEFUN_OUTPUT_DIR stands in for /output:
+// EMBERLINE entrypoint: hand the game in.
+// Copies game/ and screenshots/ from this repository into the output
+// directory (MAKEFUN_OUTPUT_DIR outside the grader, /output inside it) and
+// writes /output/dossier.json with buildDossier from the kit's
+// vendor/makefun-threejs.ts. Node 22, standard library only.
+//
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-// Serve the game locally with `node serve.ts`, then open http://localhost:8080.
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-threejs.ts';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-
-mkdirSync(out, { recursive: true });
-cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
-mkdirSync(join(out, 'screenshots'), { recursive: true });
-if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
-
-// The scorer's own caps (reference/gate.json): only text_max_bytes shapes the bytes; the
-// others refuse an entry the scorer would refuse (more than 4 screenshots or one over
-// 256 KiB; more than 993 files in game/ or 48 MiB of game files, in all: game/ counts
-// beside /output's own 1000-entry cap, its screenshots/ and dossier.json).
-const DOSSIER_LIMITS = {
+// The dossier caps the bounty fixes: the judge reads at most 160 KiB of
+// source text, and the dossier itself at most 1.5 MiB. Keep them in one
+// named place so a cap change touches one line, not the build call.
+const DOSSIER_CAPS = {
   text_max_bytes: 163840,
   screenshots: { max: 4, max_bytes: 262144 },
   game_max_files: 993,
-  game_max_bytes: 50331648,
+  game_max_bytes: 48 * 1024 * 1024,
+  game_path_max_bytes: 1000,
 };
-writeFileSync(join(out, 'dossier.json'), buildDossier(out, DOSSIER_LIMITS));
+
+const repoRoot = dirname(fileURLToPath(import.meta.url));
+const outputDir = resolve(process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
+
+// The trees the entry ships: the game itself and its screenshots. The
+// dossier is built from exactly what lands in the output directory, so the
+// copy and the build cannot disagree about the entry's contents.
+const SHIPPED_TREES = ['game', 'screenshots'];
+
+function copyTree(name) {
+  const from = join(repoRoot, name);
+  const to = join(outputDir, name);
+  if (!existsSync(from)) {
+    console.log(`main.ts: no ${name}/ in the repository, skipping`);
+    return;
+  }
+  cpSync(from, to, { recursive: true });
+  console.log(`main.ts: copied ${name}/ -> ${to}`);
+}
+
+rmSync(outputDir, { recursive: true, force: true });
+mkdirSync(outputDir, { recursive: true });
+for (const tree of SHIPPED_TREES) copyTree(tree);
+
+const dossier = buildDossier(outputDir, DOSSIER_CAPS);
+writeFileSync(join(outputDir, 'dossier.json'), dossier);
+console.log(`main.ts: wrote dossier.json (${dossier.length} bytes) to ${outputDir}`);

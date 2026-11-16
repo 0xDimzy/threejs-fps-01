@@ -1,103 +1,107 @@
-// Cinderworks Yard, as data. One source of truth — world.js builds meshes and
-// colliders from BOXES, hud.js draws the minimap from the same boxes, bots.js
-// walks ROUTES through the same waypoint graph. Coordinates: x east, z south;
-// the yard is 40 x 32 m, the two sites at the north end (z = -11), Vanguard
-// spawning south (z = +13.5), Cinder spawning north. Three lanes join them:
-// A-long down the west side past the furnace, mid through the container canyon,
-// B-tunnel under the gantry on the east side.
+// Cinderworks Yard — map data for EMBERLINE. An original industrial yard,
+// 40 x 32 m. x runs west (-) to east (+), z runs north (-) to south (+).
+// Vanguard spawns south, Cinder bots spawn north. Site A sits west, Site B
+// east, joined by three lanes: A-long past the furnace (west), mid through
+// the container canyon (centre), B-tunnel under the gantry (east).
+//
+// A solid is { cx, cz, sx, sz, h, y0 }: centre, footprint, height, base
+// height (y0 defaults to 0; the gantry beam floats above head height so the
+// lane under it stays walkable).
 export const MAP = {
-  bounds: { minX: -20, maxX: 20, minZ: -16, maxZ: 16 },
-  playerSpawn: [0, 13.5],
-  botSpawns: [[-16, -13.5], [-5, -13.5], [5, -13.5], [16, -13.5]],
-  plantRadius: 3.4,
-  sites: [
-    { id: 'A', name: 'Site A', x: -14, z: -11, color: 'siteA' },
-    { id: 'B', name: 'Site B', x: 14, z: -11, color: 'siteB' },
+  width: 40,
+  depth: 32,
+  // Perimeter walls.
+  solids: [
+    { cx: 0, cz: -16.5, sx: 42, sz: 1, h: 4 }, // north
+    { cx: 0, cz: 16.5, sx: 42, sz: 1, h: 4 }, // south
+    { cx: -20.5, cz: 0, sx: 1, sz: 34, h: 4 }, // west
+    { cx: 20.5, cz: 0, sx: 1, sz: 34, h: 4 }, // east
+    // Furnace block on A-long.
+    { cx: -17, cz: -3, sx: 4, sz: 3, h: 3.2 },
+    // A-long cover crates.
+    { cx: -13.5, cz: -8, sx: 2, sz: 2, h: 1.2 },
+    { cx: -13.5, cz: -8, sx: 1.2, sz: 1.2, h: 2.4, y0: 1.2 },
+    { cx: -15, cz: 4, sx: 1.8, sz: 1.8, h: 1.1 },
+    // Site A low walls.
+    { cx: -16, cz: -12.5, sx: 3, sz: 1, h: 1.4 },
+    { cx: -12.5, cz: -13, sx: 1.5, sz: 1.5, h: 1.2 },
+    // Container canyon, mid.
+    { cx: -3, cz: -6, sx: 6, sz: 2.4, h: 2.6 },
+    { cx: 3, cz: 3, sx: 6, sz: 2.4, h: 2.6 },
+    { cx: 0, cz: -1, sx: 1.6, sz: 1.6, h: 1.1 },
+    // Mid cover walls.
+    { cx: -8, cz: 6, sx: 4, sz: 1, h: 2.2 },
+    { cx: 8, cz: -2, sx: 4, sz: 1, h: 2.2 },
+    // B-tunnel gantry: two pillars and a beam floating above head height.
+    { cx: 15, cz: -7, sx: 1, sz: 1, h: 4 },
+    { cx: 19, cz: -7, sx: 1, sz: 1, h: 4 },
+    { cx: 17, cz: -7, sx: 5, sz: 1, h: 0.8, y0: 3.0 },
+    // B-lane crates.
+    { cx: 13, cz: 6, sx: 2, sz: 2, h: 1.2 },
+    { cx: 14.5, cz: 8.5, sx: 1.5, sz: 1.5, h: 1 },
+    // Site B low walls.
+    { cx: 16, cz: -12.5, sx: 3, sz: 1, h: 1.4 },
+    { cx: 12.5, cz: -13, sx: 1.5, sz: 1.5, h: 1.2 },
+    // Vanguard spawn cover.
+    { cx: -3, cz: 12, sx: 3, sz: 1, h: 1.5 },
+    { cx: 3, cz: 12, sx: 3, sz: 1, h: 1.5 },
+    // North mid block the bots filter around.
+    { cx: -6, cz: -11, sx: 2, sz: 2, h: 1.3 },
+    { cx: 6, cz: -11, sx: 2, sz: 2, h: 1.3 },
   ],
-  // Boxes: [width, height, depth, x, y, z, palette material]. Every box is a
-  // mesh, a collider and a surface a bullet stops on.
-  boxes: [
-    // Floor and perimeter walls.
-    [40.8, 0.4, 32.8, 0, -0.2, 0, 'canvas'],
-    [0.4, 4.6, 32.8, -20.2, 2.3, 0, 'surface'],
-    [0.4, 4.6, 32.8, 20.2, 2.3, 0, 'surface'],
-    [40.8, 4.6, 0.4, 0, 2.3, -16.2, 'surface'],
-    [40.8, 4.6, 0.4, 0, 2.3, 16.2, 'surface'],
-    // The furnace block on A-long, with an amber cap.
-    [2.6, 3.4, 2.2, -17.5, 1.7, -8, 'hairline'],
-    [1.4, 1.1, 1.4, -17.5, 3.95, -8, 'accent'],
-    // A-long cover: a low wall and crates the attacker can crouch behind.
-    [0.8, 1.15, 4.4, -12.4, 0.58, -4, 'hairline'],
-    [1.5, 1.1, 1.5, -15.5, 0.55, 2.5, 'hairline'],
-    [1.5, 1.1, 1.5, -15.5, 0.55, 4.2, 'surface'],
-    [1.2, 2.2, 1.2, -10.5, 1.1, -9.5, 'surface'],
-    // Mid canyon: two container rows with a gap to peek through.
-    [5.4, 2.6, 1.6, -4.2, 1.3, 1.5, 'surface'],
-    [5.4, 2.6, 1.6, 4.2, 1.3, 1.5, 'surface'],
-    [1.6, 1.1, 1.6, -1.2, 0.55, -3.5, 'hairline'],
-    [1.6, 1.1, 1.6, 1.4, 0.55, -3.5, 'hairline'],
-    [1.2, 2.4, 1.2, 0, 1.2, -8.5, 'hairline'],
-    // Mid doors: pillars framing the sightline into both sites.
-    [1.0, 3.6, 1.0, -6.5, 1.8, -9.5, 'surface'],
-    [1.0, 3.6, 1.0, 6.5, 1.8, -9.5, 'surface'],
-    // B side: gantry deck over the tunnel lane (walk under it, 2.6 m clear).
-    [7.0, 0.5, 6.0, 15.5, 2.85, 3.5, 'surface'],
-    [0.8, 2.6, 0.8, 12.4, 1.3, 1.0, 'hairline'],
-    [0.8, 2.6, 0.8, 12.4, 1.3, 6.0, 'hairline'],
-    [0.8, 2.6, 0.8, 18.6, 1.3, 1.0, 'hairline'],
-    [0.8, 2.6, 0.8, 18.6, 1.3, 6.0, 'hairline'],
-    [1.5, 1.1, 1.5, 16.5, 0.55, -3.5, 'hairline'],
-    [1.5, 2.2, 1.5, 11.0, 1.1, -6.5, 'surface'],
-    // South cover near Vanguard spawn: crates to stage behind.
-    [2.6, 1.0, 1.2, -3.0, 0.5, 9.0, 'hairline'],
-    [2.6, 1.0, 1.2, 3.0, 0.5, 9.0, 'hairline'],
-    [1.2, 1.0, 1.2, 0, 0.5, 11.5, 'surface'],
-    // Site props: barrels and a low wall on each site.
-    [1.1, 1.1, 1.1, -17.0, 0.55, -13.5, 'hairline'],
-    [1.1, 1.1, 1.1, -11.0, 0.55, -13.5, 'hairline'],
-    [1.1, 1.1, 1.1, 11.0, 0.55, -13.5, 'hairline'],
-    [1.1, 1.1, 1.1, 17.0, 0.55, -13.5, 'hairline'],
-    [3.2, 1.0, 0.8, -14, 0.5, -7.6, 'hairline'],
-    [3.2, 1.0, 0.8, 14, 0.5, -7.6, 'hairline'],
-  ],
-  // Painted floor strips, visual only — no collider. [width, depth, x, z, material]
-  strips: [
-    [2.2, 24, -14, -2, 'siteA'],
-    [2.2, 24, 14, -2, 'siteB'],
-    [2.2, 20, 0, 2, 'hairline'],
-  ],
-  // Waypoint graph: id -> [x, z]. Bots follow ROUTES; a hunting bot steers to the
-  // nearest node, then along nodes toward its target.
-  nodes: {
-    spawn: [0, 13],
-    aCorner: [-15, 6],
-    aLong: [-16, -2],
-    aDoor: [-14, -7],
-    aSite: [-14, -11],
-    aMid: [-8, -2],
-    midLow: [0, 7],
-    midCanyon: [0, -1],
-    midDoor: [0, -7],
-    bCorner: [15, 6],
-    bTun: [15, 0],
-    bDoor: [14, -7],
-    bSite: [14, -11],
-    bMid: [8, -2],
-    northMid: [0, -12],
+  sites: {
+    A: { x: -16, z: -10.5, r: 4.5, color: 0xffb020 },
+    B: { x: 16, z: -10.5, r: 4.5, color: 0x35d0e0 },
   },
-  // One route per bot: waypoints in order, the last one is the hold position.
-  routes: [
-    ['aCorner', 'aLong', 'aDoor', 'aSite'],
-    ['midLow', 'midCanyon', 'midDoor', 'northMid'],
-    ['bCorner', 'bTun', 'bDoor', 'bSite'],
-    ['aMid', 'midCanyon', 'aMid', 'bMid'],
+  vanguardSpawn: { x: 0, z: 14, yaw: 0 },
+  botSpawns: [
+    { x: -18, z: -14 },
+    { x: -6, z: -14.5 },
+    { x: 6, z: -14.5 },
+    { x: 18, z: -14 },
   ],
-  // Where each bot holds: [x, z, facing yaw]. Yaw 0 faces south (-z is north
-  // here, so a bot facing the player spawn uses yaw Math.PI).
-  holds: [
-    [-14, -9.5, Math.PI],
-    [0, -11.5, Math.PI],
-    [14, -9.5, Math.PI],
-    [-8, -2, Math.PI * 0.75],
+  botNames: ['Ash', 'Slag', 'Cinder', 'Rust'],
+  // Fixed routes from the north spawns down into the yard. Each bot walks
+  // its route, then holds the last waypoint and watches a lane.
+  routes: [
+    // Ash — A-long, past the furnace, holds the west mid.
+    [
+      [-18, -13], [-17, -6], [-16, 2], [-13, 8], [-8, 11],
+    ],
+    // Slag — mid through the container canyon.
+    [
+      [-6, -13], [-4, -8], [-1, -2], [1, 5], [5, 10],
+    ],
+    // Cinder — B-tunnel under the gantry.
+    [
+      [18, -13], [17, -7], [17, 0], [14, 6], [10, 11],
+    ],
+    // Rust — flex, drifts centre-west and watches mid.
+    [
+      [6, -13], [4, -8], [0, -2], [-3, 4], [-1, 10],
+    ],
   ],
 };
+
+// True when (x, z) is inside the named site's plant circle.
+export function insideSite(x, z, site) {
+  const s = MAP.sites[site];
+  const dx = x - s.x;
+  const dz = z - s.z;
+  return dx * dx + dz * dz <= s.r * s.r;
+}
+
+// Which site, if any, contains (x, z).
+export function siteAt(x, z) {
+  if (insideSite(x, z, 'A')) return 'A';
+  if (insideSite(x, z, 'B')) return 'B';
+  return null;
+}
+
+// Clamp a point into the playable yard (inside the perimeter walls).
+export function clampToYard(x, z) {
+  return {
+    x: Math.max(-19.4, Math.min(19.4, x)),
+    z: Math.max(-15.4, Math.min(15.4, z)),
+  };
+}

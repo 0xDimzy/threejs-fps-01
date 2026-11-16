@@ -1,111 +1,149 @@
-// The yard, built from MAP: every box is a mesh, a collider and a surface a
-// bullet stops on. One material per palette name, shared by every mesh. Site
-// beacons are glowing floor rings with a point light each; lane strips are flat
-// paint on the floor. No textures, no models, no network — styled geometry only.
+// World building: turn the map data into three.js meshes, lights and
+// colliders. Geometry is styled, not copied: crates, containers, the furnace
+// and the gantry are plain boxes with a chosen palette, lit by a low amber
+// sun and a cool fill, with fog and a dusk sky. The minimap reads the same
+// map data, so the HUD and the 3D yard always agree.
 import * as THREE from 'three';
-import { PALETTE } from './palette.js';
 import { MAP } from './map.js';
+import { PAL } from './palette.js';
+import { solidBounds } from './physics.js';
 
-export function createWorld(scene) {
+function boxMesh(w, h, d, color, roughness = 0.9) {
+  const mat = new THREE.MeshStandardMaterial({ color, roughness, metalness: 0.08 });
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+// Pick a container colour from its position so the canyon reads varied.
+function containerColor(cx, cz) {
+  const n = Math.abs(Math.sin(cx * 12.9898 + cz * 78.233) * 43758.5453) % 1;
+  if (n < 0.4) return PAL.containerA;
+  if (n < 0.75) return PAL.containerB;
+  return PAL.containerC;
+}
+
+export function buildWorld(scene) {
+  scene.background = new THREE.Color(PAL.sky);
+  scene.fog = new THREE.Fog(PAL.fog, 28, 78);
+
+  const solids = MAP.solids.map(solidBounds);
   const group = new THREE.Group();
   scene.add(group);
 
-  // One shared material per palette name, built once up front.
-  const materials = {};
-  for (const name of Object.keys(PALETTE)) {
-    materials[name] = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(PALETTE[name]),
-      roughness: name === 'accent' || name === 'ink' ? 0.55 : 0.92,
-      metalness: 0.03,
-    });
-  }
+  // Ground: one slab plus a darker yard stripe down the middle lane.
+  const ground = new THREE.Mesh(
+    new THREE.BoxGeometry(MAP.width + 2, 0.2, MAP.depth + 2),
+    new THREE.MeshStandardMaterial({ color: PAL.ground, roughness: 1 }),
+  );
+  ground.position.set(0, -0.1, 0);
+  ground.receiveShadow = true;
+  group.add(ground);
+  const stripe = new THREE.Mesh(
+    new THREE.BoxGeometry(3, 0.02, MAP.depth),
+    new THREE.MeshStandardMaterial({ color: PAL.groundDark, roughness: 1 }),
+  );
+  stripe.position.set(0, 0.011, 0);
+  stripe.receiveShadow = true;
+  group.add(stripe);
 
-  const colliders = [];
-  const shootables = [];
-
-  // Colliders are computed straight from the map data — the box bounds are
-  // already in the table, so no per-mesh setFromObject pass runs at load.
-  function addBox(width, height, depth, x, y, z, materialName) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), materials[materialName]);
-    mesh.position.set(x, y, z);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
+  // Every map solid becomes a mesh. Crates get a warm timber tone, the
+  // furnace a dark brick with a glowing mouth, the gantry rusted steel.
+  for (const s of MAP.solids) {
+    const y0 = s.y0 ?? 0;
+    let mesh;
+    if (s.h >= 3.9 && (s.sx === 1 || s.sz === 1)) {
+      // Perimeter wall or gantry pillar: darker steel.
+      mesh = boxMesh(s.sx, s.h, s.sz, s.sx > s.sz ? PAL.wall : PAL.wallDark);
+    } else if (s.cx === -17 && s.cz === -3) {
+      mesh = boxMesh(s.sx, s.h, s.sz, PAL.furnace, 0.7);
+    } else if (s.sx >= 5 && s.sz <= 2.5) {
+      mesh = boxMesh(s.sx, s.h, s.sz, containerColor(s.cx, s.cz), 0.6);
+    } else if (s.h <= 1.5) {
+      mesh = boxMesh(s.sx, s.h, s.sz, s.h >= 1.4 ? PAL.wallDark : PAL.crate);
+    } else if (y0 > 0) {
+      mesh = boxMesh(s.sx, s.h, s.sz, PAL.gantryRust, 0.6);
+    } else {
+      mesh = boxMesh(s.sx, s.h, s.sz, PAL.crateDark);
+    }
+    mesh.position.set(s.cx, y0 + s.h / 2, s.cz);
     group.add(mesh);
-    colliders.push(new THREE.Box3(
-      new THREE.Vector3(x - width / 2, y - height / 2, z - depth / 2),
-      new THREE.Vector3(x + width / 2, y + height / 2, z + depth / 2),
-    ));
-    shootables.push(mesh);
-    return mesh;
   }
 
-  for (const [w, h, d, x, y, z, mat] of MAP.boxes) addBox(w, h, d, x, y, z, mat);
+  // Furnace mouth: a glowing slit on the furnace's south face.
+  const mouth = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.2, 0.9),
+    new THREE.MeshBasicMaterial({ color: PAL.furnaceGlow }),
+  );
+  mouth.position.set(-17, 1.1, -1.48);
+  group.add(mouth);
+  const furnaceLight = new THREE.PointLight(PAL.furnaceGlow, 18, 14, 1.8);
+  furnaceLight.position.set(-17, 1.6, -0.5);
+  group.add(furnaceLight);
 
-  // Painted lane strips: flat boxes 2 cm above the floor, never colliders.
-  for (const [w, d, x, z, mat] of MAP.strips) {
-    const strip = new THREE.Mesh(
-      new THREE.BoxGeometry(w, 0.02, d),
-      new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE[mat]), roughness: 0.9, transparent: true, opacity: 0.35 }),
-    );
-    strip.position.set(x, 0.02, z);
-    strip.receiveShadow = true;
-    group.add(strip);
-  }
-
-  // Site beacons: a ring on the floor and a low post light each, in the site colour.
-  const beacons = [];
-  for (const site of MAP.sites) {
+  // Site beacons: a glowing ring on the ground and a light column.
+  const beacons = {};
+  for (const [key, site] of Object.entries(MAP.sites)) {
     const ring = new THREE.Mesh(
-      new THREE.RingGeometry(MAP.plantRadius - 0.25, MAP.plantRadius, 40),
-      new THREE.MeshBasicMaterial({ color: new THREE.Color(PALETTE[site.color]), transparent: true, opacity: 0.55, side: THREE.DoubleSide }),
+      new THREE.RingGeometry(site.r - 0.25, site.r, 40),
+      new THREE.MeshBasicMaterial({ color: site.color, transparent: true, opacity: 0.55, side: THREE.DoubleSide }),
     );
     ring.rotation.x = -Math.PI / 2;
-    ring.position.set(site.x, 0.04, site.z);
+    ring.position.set(site.x, 0.02, site.z);
     group.add(ring);
-    const post = new THREE.Mesh(
-      new THREE.BoxGeometry(0.3, 2.6, 0.3),
-      materials[site.color === 'siteA' ? 'accent' : 'surface'],
+    const disc = new THREE.Mesh(
+      new THREE.CircleGeometry(site.r, 32),
+      new THREE.MeshBasicMaterial({ color: site.color, transparent: true, opacity: 0.08, side: THREE.DoubleSide }),
     );
-    post.position.set(site.x, 1.3, site.z - MAP.plantRadius - 0.4);
-    post.castShadow = true;
-    group.add(post);
-    const light = new THREE.PointLight(new THREE.Color(PALETTE[site.color]), 22, 13);
-    light.position.set(site.x, 3.0, site.z);
-    scene.add(light);
-    beacons.push({ site, ring, light });
+    disc.rotation.x = -Math.PI / 2;
+    disc.position.set(site.x, 0.015, site.z);
+    group.add(disc);
+    const light = new THREE.PointLight(site.color, 10, 12, 1.6);
+    light.position.set(site.x, 3.2, site.z);
+    group.add(light);
+    const letter = makeLetterSprite(key, site.color);
+    letter.position.set(site.x, 4.6, site.z);
+    group.add(letter);
+    beacons[key] = { ring, light };
   }
 
-  // Barrels: cylinders on the site corners, with a box collider each, also
-  // computed from the numbers (radius 0.42, height 1.05, centre y 0.53).
-  const barrelGeometry = new THREE.CylinderGeometry(0.42, 0.42, 1.05, 14);
-  for (const [x, z] of [[-18.5, -5], [18.5, -5], [-6, 12.5], [6, 12.5], [-18.5, 12.5], [18.5, 12.5]]) {
-    const barrel = new THREE.Mesh(barrelGeometry, materials.hairline);
-    barrel.position.set(x, 0.53, z);
-    barrel.castShadow = true;
-    barrel.receiveShadow = true;
-    group.add(barrel);
-    colliders.push(new THREE.Box3(new THREE.Vector3(x - 0.42, 0, z - 0.42), new THREE.Vector3(x + 0.42, 1.06, z + 0.42)));
-    shootables.push(barrel);
-  }
-
-  // Light: a low amber dusk sun, a cool fill, and a sky/ground gradient.
-  const sky = new THREE.HemisphereLight(new THREE.Color('#7d8ea6'), new THREE.Color(PALETTE.canvas), 2.0);
-  scene.add(sky);
-  const key = new THREE.DirectionalLight(new THREE.Color('#ffd9a0'), 2.6);
-  key.position.set(-14, 18, 12);
-  key.target.position.set(0, 0, -4);
-  key.castShadow = true;
-  key.shadow.mapSize.set(2048, 2048);
-  key.shadow.camera.left = -26;
-  key.shadow.camera.right = 26;
-  key.shadow.camera.top = 26;
-  key.shadow.camera.bottom = -26;
-  key.shadow.camera.far = 60;
-  key.shadow.bias = -0.0006;
-  scene.add(key, key.target);
-  const fill = new THREE.DirectionalLight(new THREE.Color(PALETTE.muted), 1.1);
-  fill.position.set(12, 10, -12);
+  // Lighting: low amber sun from the west, cool fill from the east, a dim
+  // hemisphere so shadows never go black.
+  const sun = new THREE.DirectionalLight(0xffb36b, 2.4);
+  sun.position.set(-28, 14, 10);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.left = -26;
+  sun.shadow.camera.right = 26;
+  sun.shadow.camera.top = 22;
+  sun.shadow.camera.bottom = -22;
+  sun.shadow.camera.far = 80;
+  scene.add(sun);
+  const fill = new THREE.DirectionalLight(0x7fa8c9, 0.55);
+  fill.position.set(24, 18, -12);
   scene.add(fill);
+  scene.add(new THREE.HemisphereLight(0x8a94a8, 0x2a2118, 0.5));
 
-  return { colliders, shootables, group, beacons };
+  return { solids, group, beacons, furnaceLight };
+}
+
+// A floating letter sprite ("A" / "B") above each site, drawn on canvas.
+function makeLetterSprite(letter, color) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, 128, 128);
+  ctx.fillStyle = `#${color.toString(16).padStart(6, '0')}`;
+  ctx.font = 'bold 84px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(letter, 64, 68);
+  const tex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(2.2, 2.2, 1);
+  return sprite;
 }

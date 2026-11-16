@@ -1,66 +1,99 @@
-// The single match-state object. Every number the round machine, the economy
-// and the HUD read lives in here — the player, the bots and the weapon rig keep
-// only their own bodies and loadouts. Phase flow:
-//   menu -> buy -> live -> roundEnd -> (buy | matchEnd)
-export const BUY_SECONDS = 15;
-export const ROUND_SECONDS = 100;
-export const PLANT_SECONDS = 3.5;
-export const FUSE_SECONDS = 35;
-export const DEFUSE_SECONDS = 5;
-export const ROUNDS_TO_WIN = 5;
-export const MAX_ROUNDS = 9;
-export const START_MONEY = 800;
-export const KILL_REWARD = 300;
-export const WIN_REWARD = 325;
-export const LOSS_REWARD = 190;
-export const PLANT_REWARD = 300;
+// The one match-state object. Everything about the match — rounds, money,
+// phase clocks, the plant — lives here so the HUD, bots and main loop all
+// read the same truth. Nothing here touches three.js or the DOM.
+export const ECONOMY = {
+  startMoney: 800,
+  killBonus: 300,
+  winBonus: 325,
+  lossBonus: 190,
+  plantBonus: 300,
+  price: { wasp: 600, breacher: 700, frag: 300, kevlar: 650 },
+};
 
-// A fresh match. The plant sub-object tracks the charge through its whole life:
-// 'none' -> planting (progress 0..1) -> 'planted' (fuse counting down) -> done.
-export function createMatchState() {
+export const TIMING = {
+  buySeconds: 15,
+  liveSeconds: 100,
+  fuseSeconds: 35,
+  plantSeconds: 3.5,
+  defuseSeconds: 5,
+  roundsToWin: 5,
+  maxRounds: 9,
+  roundEndSeconds: 4,
+};
+
+export function createMatch() {
   return {
-    phase: 'menu',
     round: 1,
-    wins: 0,
-    losses: 0,
-    money: START_MONEY,
-    timer: BUY_SECONDS,
-    playerHealth: 100,
-    playerAlive: true,
+    vanguardRounds: 0,
+    cinderRounds: 0,
+    money: ECONOMY.startMoney,
+    phase: 'menu', // menu | buy | live | planted | roundEnd | matchEnd
+    phaseClock: 0,
+    fuseClock: 0,
+    plantedSite: null, // 'A' | 'B' | null
+    plantHeld: 0,
+    defuseHeld: 0,
+    defusingBot: null,
     kills: 0,
-    plant: { status: 'none', site: null, progress: 0, fuse: 0, defuse: 0, defuser: null },
-    feed: [],
+    deaths: 0,
+    plants: 0,
+    lastRoundWinner: null, // 'vanguard' | 'cinder' | null
+    lastRoundReason: '',
+    matchWinner: null,
+    shotMode: null, // set by main.js when ?shot= is present
+    seed: 1,
+    frozen: false,
   };
 }
 
-// Start a new match from the menu: score, money and round all back to their
-// opening values, the charge cleared, the player back at full health.
-export function resetMatch(state) {
-  state.phase = 'buy';
-  state.round = 1;
-  state.wins = 0;
-  state.losses = 0;
-  state.money = START_MONEY;
-  state.timer = BUY_SECONDS;
-  state.playerHealth = 100;
-  state.playerAlive = true;
-  state.kills = 0;
-  state.plant = { status: 'none', site: null, progress: 0, fuse: 0, defuse: 0, defuser: null };
-  state.feed = [];
+// Move the match into a phase and restart its clock.
+export function setPhase(match, phase) {
+  match.phase = phase;
+  match.phaseClock = 0;
 }
 
-// Between rounds: a fresh buy phase and a fresh player, but the score, the money
-// and the kill count carry over.
-export function resetRound(state) {
-  state.timer = BUY_SECONDS;
-  state.phase = 'buy';
-  state.playerHealth = 100;
-  state.playerAlive = true;
-  state.plant = { status: 'none', site: null, progress: 0, fuse: 0, defuse: 0, defuser: null };
+// Begin a fresh round: buy phase, plant/defuse cleared, money kept.
+export function startRound(match) {
+  match.plantedSite = null;
+  match.fuseClock = 0;
+  match.plantHeld = 0;
+  match.defuseHeld = 0;
+  match.defusingBot = null;
+  match.lastRoundWinner = null;
+  match.lastRoundReason = '';
+  setPhase(match, 'buy');
 }
 
-// The kill feed keeps its last five entries.
-export function addFeed(state, text, kind) {
-  state.feed.push({ text, kind: kind || 'info', time: 0 });
-  if (state.feed.length > 5) state.feed.shift();
+// Pay out the round result and decide whether the match is over.
+export function settleRound(match, winner, reason) {
+  match.lastRoundWinner = winner;
+  match.lastRoundReason = reason;
+  if (winner === 'vanguard') {
+    match.vanguardRounds += 1;
+    match.money += ECONOMY.winBonus;
+  } else {
+    match.cinderRounds += 1;
+    match.money += ECONOMY.lossBonus;
+  }
+  const done =
+    match.vanguardRounds >= TIMING.roundsToWin ||
+    match.cinderRounds >= TIMING.roundsToWin ||
+    match.round >= TIMING.maxRounds;
+  if (done) {
+    match.matchWinner =
+      match.vanguardRounds > match.cinderRounds ? 'vanguard' : 'cinder';
+    setPhase(match, 'matchEnd');
+  } else {
+    match.round += 1;
+    setPhase(match, 'roundEnd');
+  }
+  return done;
+}
+
+export function scoreText(match) {
+  return `${match.vanguardRounds} — ${match.cinderRounds}`;
+}
+
+export function canAfford(match, item) {
+  return match.money >= ECONOMY.price[item];
 }
